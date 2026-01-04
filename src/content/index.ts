@@ -13,3 +13,11 @@ onMessage('toggle-selection', ({ data }) => {
     selector.deactivate();
   }
 });
+
+// Listen for toggle command from Background (Click) - Raw Chrome Message for Broadcast
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && message.type === 'style-sniffer-toggle') {
+        console.log('Received toggle request from background (Broadcast)');
+        selector.toggle();
+    }
+});

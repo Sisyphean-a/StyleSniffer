@@ -26,9 +26,15 @@ export class Extractor {
 
     // 4. 解析并匹配
     const matchedRules = new Set<string>();
+    const usedTokenClasses = new Set<string>();
     
-    // 递归获取所有相关元素
+    // 递归获取所有相关元素 (Original)
     const allElements = [element, ...Array.from(element.querySelectorAll('*'))];
+    
+    // Special handling: which elements are "safe" (all classes used) due to attribute selectors
+    const elementsWithAttributeMatch = new Set<Element>();
+
+    const classTokenRegex = /\.(-?[_a-zA-Z]+[_a-zA-Z0-9-]*)/g;
 
     for (const cssText of cssContents) {
       if (!cssText) continue;
@@ -39,25 +45,36 @@ export class Extractor {
           enter: (node: CssNode) => {
              const rule = node as Rule;
              if (rule.prelude.type === 'SelectorList') {
-                 // 简单处理：生成选择器字符串，尝试匹配
-                 // 注意：css-tree 的 generate 可能比较慢，需优化
-                 // 这里需要更精细的 AST 处理，暂时粗暴实现
                  const selectorStr = generate(rule.prelude);
-                 
-                 // 拆分逗号分隔的选择器
                  const selectors = selectorStr.split(','); 
                  
                  for (let sel of selectors) {
                      sel = sel.trim();
-                     // Remove pseudo-classes that might break matches() (like :hover for now, or keep them?)
-                     // matches() actually supports many pseudo-classes.
                      try {
-                         // 检查是否匹配我们选区内的任何元素
-                         // 性能警告：O(N*M)
-                         const isMatch = allElements.some(el => el.matches(sel));
-                         if (isMatch) {
+                         // Check match efficiently
+                         // We iterate inputs to find specific matches
+                         // Optimization: Using querySelectorAll from root if possible, 
+                         // but here we have a constrained list 'allElements'.
+                         // 'matches' on all elements is O(N*M), slow but acceptable for small snippets.
+                         
+                         // To identify which elements matched this specific selector:
+                         const matchedEls = allElements.filter(el => el.matches(sel));
+                         
+                         if (matchedEls.length > 0) {
                             matchedRules.add(`${generate(rule.prelude)} { ${generate(rule.block)} }`);
-                            break; // 只要有一个部分匹配，就保留整条规则 (或者只保留匹配的那部分?) -> 保留整条比较安全
+                            
+                            // Analysis for Unused Classes
+                            // 1. Extract explicit class tokens from selector
+                            let match;
+                            classTokenRegex.lastIndex = 0;
+                            while ((match = classTokenRegex.exec(sel)) !== null) {
+                                usedTokenClasses.add(match[1]);
+                            }
+
+                            // 2. Check for attribute selectors on class
+                            if (sel.includes('[class')) {
+                                matchedEls.forEach(el => elementsWithAttributeMatch.add(el));
+                            }
                          }
                      } catch (e) {
                          // Ignore invalid selectors
@@ -71,9 +88,47 @@ export class Extractor {
       }
     }
 
-    // 5. 生成结果
+    // 5. 生成结果 (HTML Cleaning)
+    const clone = element.cloneNode(true) as HTMLElement;
+    const allClonedElements = [clone, ...Array.from(clone.querySelectorAll('*'))];
+
+    // Map original elements to cloned elements by index (assuming structure is identical)
+    // This relies on querySelectorAll returning traversal order being consistent.
+    // Since we just cloned, order is preserved.
+    
+    allClonedElements.forEach((el, index) => {
+        const originalEl = allElements[index];
+        if (!originalEl) return; // Should not happen
+
+        if (el instanceof HTMLElement) {
+            const classes = Array.from(el.classList);
+            if (classes.length > 0) {
+                const uniqueClasses = new Set(classes); // Deduplicate
+                const finalClasses: string[] = [];
+
+                // Logic:
+                // If this element was matched by an attribute selector (e.g. [class^="test"]), 
+                // we treat ALL its classes as "used" to be safe.
+                // Otherwise, we only keep classes that appeared explicitly in some matched selector.
+                const preserveAll = elementsWithAttributeMatch.has(originalEl);
+
+                uniqueClasses.forEach(cls => {
+                    if (preserveAll || usedTokenClasses.has(cls)) {
+                        finalClasses.push(cls);
+                    }
+                });
+
+                if (finalClasses.length > 0) {
+                    el.className = finalClasses.join(' ');
+                } else {
+                    el.removeAttribute('class');
+                }
+            }
+        }
+    });
+
     const cssResult = Array.from(matchedRules).join('\n');
-    const htmlResult = element.outerHTML;
+    const htmlResult = clone.outerHTML;
 
     return `<style>\n${cssResult}\n</style>\n\n${htmlResult}`;
     
