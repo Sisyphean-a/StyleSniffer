@@ -1,5 +1,5 @@
 import { sendMessage } from 'webext-bridge/content-script';
-import { parse, walk, generate, type CssNode, type Rule } from 'css-tree';
+import { parse, walk, generate, type CssNode, type Rule, type Declaration } from 'css-tree';
 
 export class Extractor {
   /**
@@ -25,14 +25,15 @@ export class Extractor {
     console.log(`Loaded ${cssContents.length} style chunks. Parsing...`);
 
     // 4. 解析并匹配
-    const matchedRules = new Set<string>();
-    const usedTokenClasses = new Set<string>();
+    // Map<Selector, Declaration[]> to deduplicate at property level
+    const ruleMap = new Map<string, Declaration[]>();
     
     // 递归获取所有相关元素 (Original)
     const allElements = [element, ...Array.from(element.querySelectorAll('*'))];
     
     // Special handling: which elements are "safe" (all classes used) due to attribute selectors
     const elementsWithAttributeMatch = new Set<Element>();
+    const usedTokenClasses = new Set<string>();
 
     const classTokenRegex = /\.(-?[_a-zA-Z]+[_a-zA-Z0-9-]*)/g;
 
@@ -50,28 +51,43 @@ export class Extractor {
                  
                  for (let sel of selectors) {
                      sel = sel.trim();
+                     if (!sel) continue;
+
                      try {
-                         // Check match efficiently
-                         // We iterate inputs to find specific matches
-                         // Optimization: Using querySelectorAll from root if possible, 
-                         // but here we have a constrained list 'allElements'.
-                         // 'matches' on all elements is O(N*M), slow but acceptable for small snippets.
-                         
-                         // To identify which elements matched this specific selector:
+                         // Strict Match Check
                          const matchedEls = allElements.filter(el => el.matches(sel));
                          
                          if (matchedEls.length > 0) {
-                            matchedRules.add(`${generate(rule.prelude)} { ${generate(rule.block)} }`);
+                            // CLEANUP: Remove data-v garbage
+                            const cleanSel = sel.replace(/\[data-v-[a-zA-Z0-9]+(?:='[^']*'|="[^"]*")?\]/g, '').trim();
+                            if (!cleanSel) continue;
+
+                            // Extract Declarations
+                            const declarations: Declaration[] = [];
+                            // Using walk on the block key seems safer or just iterating children if specific type
+                            if (rule.block.children) {
+                                rule.block.children.forEach(child => {
+                                    if (child.type === 'Declaration') {
+                                        declarations.push(child as Declaration);
+                                    }
+                                });
+                            }
+
+                            if (declarations.length > 0) {
+                                if (ruleMap.has(cleanSel)) {
+                                    ruleMap.get(cleanSel)!.push(...declarations);
+                                } else {
+                                    ruleMap.set(cleanSel, [...declarations]);
+                                }
+                            }
                             
                             // Analysis for Unused Classes
-                            // 1. Extract explicit class tokens from selector
                             let match;
                             classTokenRegex.lastIndex = 0;
                             while ((match = classTokenRegex.exec(sel)) !== null) {
                                 usedTokenClasses.add(match[1]);
                             }
 
-                            // 2. Check for attribute selectors on class
                             if (sel.includes('[class')) {
                                 matchedEls.forEach(el => elementsWithAttributeMatch.add(el));
                             }
@@ -88,46 +104,104 @@ export class Extractor {
       }
     }
 
-    // 5. 生成结果 (HTML Cleaning)
+    // 5. 生成结果 (HTML Cleaning & Optimization)
     const clone = element.cloneNode(true) as HTMLElement;
-    const allClonedElements = [clone, ...Array.from(clone.querySelectorAll('*'))];
-
-    // Map original elements to cloned elements by index (assuming structure is identical)
-    // This relies on querySelectorAll returning traversal order being consistent.
-    // Since we just cloned, order is preserved.
     
-    allClonedElements.forEach((el, index) => {
-        const originalEl = allElements[index];
-        if (!originalEl) return; // Should not happen
+    // Helper to clean a single node
+    const cleanupNode = (node: HTMLElement, original: Element) => {
+        // A. Remove Hidden Elements
+        const computed = window.getComputedStyle(original);
+        if (computed.display === 'none') {
+            node.remove();
+            return false;
+        }
 
-        if (el instanceof HTMLElement) {
-            const classes = Array.from(el.classList);
-            if (classes.length > 0) {
-                const uniqueClasses = new Set(classes); // Deduplicate
-                const finalClasses: string[] = [];
+        // B. Remove Self-Pollution
+        if (node.style.outline) node.style.removeProperty('outline');
+        if (node.style.outlineOffset) node.style.removeProperty('outline-offset');
+        if (node.style.cursor) node.style.removeProperty('cursor');
+        if (node.getAttribute('style')?.trim() === '') node.removeAttribute('style');
 
-                // Logic:
-                // If this element was matched by an attribute selector (e.g. [class^="test"]), 
-                // we treat ALL its classes as "used" to be safe.
-                // Otherwise, we only keep classes that appeared explicitly in some matched selector.
-                const preserveAll = elementsWithAttributeMatch.has(originalEl);
-
-                uniqueClasses.forEach(cls => {
-                    if (preserveAll || usedTokenClasses.has(cls)) {
-                        finalClasses.push(cls);
-                    }
-                });
-
-                if (finalClasses.length > 0) {
-                    el.className = finalClasses.join(' ');
-                } else {
-                    el.removeAttribute('class');
-                }
+        // C. Clean Vue Attributes
+        const attrs = Array.from(node.attributes);
+        for (const attr of attrs) {
+            if (attr.name.startsWith('data-v-')) {
+                node.removeAttribute(attr.name);
             }
+        }
+        return true;
+    };
+
+    // Recursive Cleaning
+    const walkClean = (cloneNode: Element, originalNode: Element) => {
+        if (!(cloneNode instanceof HTMLElement)) return;
+        const kept = cleanupNode(cloneNode, originalNode);
+        if (!kept) return; 
+
+        const cloneChildren = Array.from(cloneNode.children);
+        const origChildren = Array.from(originalNode.children);
+        
+        for (let i = 0; i < cloneChildren.length; i++) {
+            if (origChildren[i]) {
+                walkClean(cloneChildren[i], origChildren[i]);
+            }
+        }
+    };
+    
+    walkClean(clone, element);
+
+    // 6. Class Optimization on the CLEANED clone
+    const allClonedElements = [clone, ...Array.from(clone.querySelectorAll('*'))];
+    
+    allClonedElements.forEach((el) => {
+        if (el instanceof HTMLElement) {
+             const classes = Array.from(el.classList);
+             if (classes.length > 0) {
+                 const keptClasses = classes.filter(c => usedTokenClasses.has(c));
+                 if (keptClasses.length > 0) {
+                     el.className = keptClasses.join(' ');
+                 } else {
+                     el.removeAttribute('class');
+                 }
+             }
         }
     });
 
-    const cssResult = Array.from(matchedRules).join('\n');
+    // 7. Generate Final CSS String with Property Deduplication
+    const cssResult = Array.from(ruleMap.entries())
+        .map(([sel, declarations]) => {
+            // Deduplicate logic: Map<property, Declaration>
+            // Respect source order: later overrides earlier.
+            // Respect !important: existing important prevents overwrite by non-important.
+            
+            const uniqueDecls = new Map<string, Declaration>();
+            
+            declarations.forEach(decl => {
+                const prop = decl.property;
+                const newIsImportant = decl.important === true || decl.important === 'true'; // css-tree types can vary slightly or be bool/string
+                
+                if (uniqueDecls.has(prop)) {
+                    const existing = uniqueDecls.get(prop)!;
+                    const existingIsImportant = existing.important === true || existing.important === 'true';
+                    
+                    // If existing is important and new matches NOT, keep existing
+                    if (existingIsImportant && !newIsImportant) {
+                        return; 
+                    }
+                }
+                
+                // Otherwise overwrite
+                uniqueDecls.set(prop, decl);
+            });
+            
+            const blockContent = Array.from(uniqueDecls.values())
+                .map(decl => generate(decl))
+                .join('; ');
+                
+            return `${sel} { ${blockContent} }`;
+        })
+        .join('\n');
+
     const htmlResult = clone.outerHTML;
 
     return `<style>\n${cssResult}\n</style>\n\n${htmlResult}`;
