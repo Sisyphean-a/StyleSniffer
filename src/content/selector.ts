@@ -1,4 +1,5 @@
 import { toast } from './ui';
+import { sendMessage } from 'webext-bridge/content-script';
 
 export class Selector {
   private isActive: boolean = false;
@@ -156,6 +157,14 @@ export class Selector {
         const code = await extractor.extract(target);
         await this.copyToClipboard(code);
         toast.show("✅ 已复制到剪贴板！", 3000);
+        
+        // Notify background to turn off selection mode in all frames
+        try {
+            await sendMessage('extraction-completed', {}, 'background');
+        } catch (e) {
+            console.warn('Failed to notify background of completion:', e);
+        }
+
     } catch (err) {
         console.error(err);
         toast.show("❌ 提取失败: " + err, 5000);

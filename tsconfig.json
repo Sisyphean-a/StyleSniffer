@@ -20,7 +20,11 @@
             "@/*": [
                 "src/*"
             ]
-        }
+        },
+        "types": [
+            "chrome",
+            "node"
+        ]
     },
     "include": [
         "src/**/*.ts",
