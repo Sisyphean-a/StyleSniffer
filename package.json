@@ -1,0 +1,28 @@
+{
+    "name": "style-sniffer",
+    "displayName": "StyleSniffer",
+    "version": "0.0.1",
+    "description": "智能源码样式提取器 - 还原源码结构的样式提取工具",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vue-tsc --noEmit && vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "css-tree": "^2.3.1",
+        "vue": "^3.4.0",
+        "webext-bridge": "^6.0.1"
+    },
+    "devDependencies": {
+        "@crxjs/vite-plugin": "^2.0.0-beta.23",
+        "@types/chrome": "^0.0.260",
+        "@types/css-tree": "^2.3.11",
+        "@types/node": "^20.11.0",
+        "@vitejs/plugin-vue": "^5.0.0",
+        "sass": "^1.70.0",
+        "typescript": "^5.3.0",
+        "vite": "^5.1.0",
+        "vue-tsc": "^2.0.0"
+    }
+}
